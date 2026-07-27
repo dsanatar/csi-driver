@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubevirt-nfs-egress
+  namespace: kubevirt-csi-driver
+spec:
+  selector:
+    app: kubevirt-nfs-egress
+  type: ClusterIP
+  ports:
+    # NFS clients on all tenant nodes mount from this ClusterIP.
+    # During failover Kubernetes updates the endpoint automatically when
+    # the pod is rescheduled, so the VIP address stays stable.
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP
+    # The CSI controller calls CreateExport / DeleteExport on this port.
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+      protocol: TCP

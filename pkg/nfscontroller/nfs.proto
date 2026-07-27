@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package nfscontroller;
+option go_package = "pkg/nfscontroller";
+
+service NFSEgressController {
+    rpc CreateExport(CreateExportRequest) returns (CreateExportResponse);
+    rpc UpdateQuota(UpdateQuotaRequest) returns (UpdateQuotaResponse);
+    rpc DeleteExport(DeleteExportRequest) returns (DeleteExportResponse);
+}
+
+message CreateExportRequest {
+    string pvc_uid = 1;
+    int64 quota_bytes = 2;
+}
+
+message CreateExportResponse {
+    string export_path = 1;
+    bool success = 2;
+}
+
+message UpdateQuotaRequest {
+    string pvc_uid = 1;
+    int64 new_quota_bytes = 2;
+}
+
+message UpdateQuotaResponse {
+    bool success = 2;
+}
+
+message DeleteExportRequest {
+    string pvc_uid = 1;
+}
+
+message DeleteExportResponse {
+    bool success = 2;
+}

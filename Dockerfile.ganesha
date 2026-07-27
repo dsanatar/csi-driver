@@ -1,0 +1,8 @@
+FROM registry.fedoraproject.org/fedora-minimal:42
+RUN dnf update && \
+    dnf install -y nfs-ganesha nfs-ganesha-vfs dbus rpcbind && \
+    rm -rf /var/lib/apt/lists/*
+
+# rpcbind must be running before ganesha starts so it can register its services.
+CMD ["/bin/bash", "-c", \
+     "rpcbind; ganesha.nfsd -F -L /dev/stderr -f /etc/ganesha/ganesha.conf -N NIV_EVENT -p /var/run/ganesha/ganesha.pid"]

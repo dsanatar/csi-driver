@@ -1,0 +1,193 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubevirt-nfs-egress
+  namespace: kubevirt-csi-driver
+spec:
+  selector:
+    matchLabels:
+      app: kubevirt-nfs-egress
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kubevirt-nfs-egress
+    spec:
+      serviceAccount: kubevirt-nfs-egress-sa
+      priorityClassName: system-node-critical
+
+      # Required so the sidecar can send SIGHUP to the ganesha process.
+      shareProcessNamespace: true
+
+      # Only schedule on the node labelled as the NFS server.
+      # The fencing controller is responsible for moving this label to a
+      # healthy node and hotplugging the pool DV there during failover.
+      nodeSelector:
+        csi.kubevirt.io/nfs-server: "true"
+
+      tolerations:
+        - operator: Exists
+
+      # The init container guarantees the pool block device is mounted and the
+      # ganesha state directory structure exists before any main container starts.
+      # It uses standard Linux storage tools (util-linux, xfsprogs) — no custom
+      # binary required. It also renders ganesha.conf from the ConfigMap template,
+      # substituting the node name as Node_Base so the value is stable across
+      # pod restarts on the same node.
+      initContainers:
+        - name: pool-setup
+          # Requires: lsblk, blkid, mkfs.xfs (xfsprogs), mount, sed, awk.
+          # Use any image that provides util-linux and xfsprogs.
+          image: quay.io/rh-ee-dsanatar/nfs-sidecar:latest
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              # Locate the pool block device by its fixed serial.
+              DEVICE=$(lsblk -lno SERIAL,NAME | awk -v s="$POOL_DV_SERIAL" '$1==s {print "/dev/" $2; exit}')
+              if [ -z "$DEVICE" ]; then
+                echo "ERROR: no block device with serial '${POOL_DV_SERIAL}' found" >&2
+                exit 1
+              fi
+              echo "Found pool device: $DEVICE"
+
+              # Format with XFS on first use only.
+              if ! blkid -s TYPE "$DEVICE" | grep -q xfs; then
+                echo "No filesystem detected — formatting $DEVICE with XFS"
+                mkfs.xfs -f "$DEVICE"
+              fi
+
+              # Skip mount if the pool is already mounted from a previous pod
+              # restart — the Bidirectional hostPath keeps the mount on the host.
+              if ! mountpoint -q /mnt/pool; then
+                mount "$DEVICE" /mnt/pool
+                echo "Mounted $DEVICE at /mnt/pool"
+              else
+                echo "/mnt/pool already mounted — skipping"
+              fi
+
+              # Create directory structure on first use; existing dirs are a no-op.
+              mkdir -p /mnt/pool/.ganesha-state/v4recov
+              mkdir -p /mnt/pool/export
+
+              # Create an empty exports.conf if this is the first run.
+              # On recovery the file already exists on the pool device.
+              touch /mnt/pool/.ganesha-state/exports.conf
+
+              # Render ganesha.conf from the ConfigMap template, substituting
+              # the node name as Node_Base so the identifier is stable per node.
+              sed "s/GANESHA_NODE_BASE_PLACEHOLDER/${KUBE_NODE_NAME}/" \
+                /tmp/ganesha-template/ganesha.conf > /etc/ganesha/ganesha.conf
+              echo "ganesha.conf rendered with Node_Base=${KUBE_NODE_NAME}"
+          securityContext:
+            privileged: true
+          env:
+            - name: POOL_DV_SERIAL
+              value: "nfs-pool"
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: pool-mount
+              mountPath: /mnt/pool
+              mountPropagation: Bidirectional
+            - name: ganesha-conf-dir
+              mountPath: /etc/ganesha
+            - name: ganesha-config-template
+              mountPath: /tmp/ganesha-template
+              readOnly: true
+          resources:
+            requests:
+              memory: 20Mi
+              cpu: 10m
+
+      containers:
+        - name: nfs-ganesha
+          # Replace with your preferred NFS-Ganesha image (v3+ required for
+          # v4recov recovery backend and NFSv4.1 support).
+          image: quay.io/rh-ee-dsanatar/nfs-ganesha:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN", "DAC_READ_SEARCH", "SETPCAP"]
+          volumeMounts:
+            - name: ganesha-conf-dir
+              mountPath: /etc/ganesha
+            - name: pool-mount
+              mountPath: /mnt/pool
+              mountPropagation: HostToContainer
+            - name: run-ganesha
+              mountPath: /var/run/ganesha
+          ports:
+            - name: nfs
+              containerPort: 2049
+              protocol: TCP
+          resources:
+            requests:
+              memory: 100Mi
+              cpu: 50m
+
+        - name: control-sidecar
+          image: quay.io/rh-ee-dsanatar/nfs-sidecar:latest
+          imagePullPolicy: Always
+          command: ["/nfs-sidecar", "--listen-addr=:9090"]
+          securityContext:
+            privileged: true
+          env:
+            - name: POOL_MOUNT_PATH
+              value: /mnt/pool
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: pool-mount
+              mountPath: /mnt/pool
+              mountPropagation: Bidirectional
+            - name: run-ganesha
+              mountPath: /var/run/ganesha
+          ports:
+            - name: grpc
+              containerPort: 9090
+              protocol: TCP
+          resources:
+            requests:
+              memory: 50Mi
+              cpu: 10m
+
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        # Bidirectional propagation on the host-side volume ensures that mounts
+        # created by the init container (pool device at /mnt/pool) are visible
+        # to both the ganesha and sidecar containers, and that any sub-mounts
+        # the sidecar creates later propagate back to the host.
+        - name: pool-mount
+          hostPath:
+            path: /mnt/pool
+            type: DirectoryOrCreate
+        # ganesha-conf-dir is a shared writable directory. The init container
+        # renders the final ganesha.conf (with Node_Base substituted) into it
+        # from the ConfigMap template. Ganesha reads from this directory, not
+        # directly from the ConfigMap.
+        - name: ganesha-conf-dir
+          hostPath:
+            path: /etc/ganesha
+            type: DirectoryOrCreate
+        - name: ganesha-config-template
+          configMap:
+            name: ganesha-config
+        - name: run-ganesha
+          hostPath:
+            path: /var/run/ganesha
+            type: DirectoryOrCreate

@@ -1,0 +1,73 @@
+---
+# ServiceAccount for the NFS Egress Pod (ganesha + control-sidecar).
+# The pod itself does not need Kubernetes API access; this SA exists
+# to allow it to run as privileged on OpenShift via the SCC rule below.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubevirt-nfs-egress-sa
+  namespace: kubevirt-csi-driver
+---
+# ServiceAccount for the fencing controller.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubevirt-nfs-fencing-sa
+  namespace: kubevirt-csi-driver
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubevirt-nfs-egress-cr
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["use"]
+    resourceNames: ["privileged"]
+---
+# The fencing controller needs to watch nodes, move the NFS server label,
+# apply taints, and force-delete the NFS Egress Pod.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubevirt-nfs-fencing-cr
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["use"]
+    resourceNames: ["privileged"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubevirt-nfs-egress-binding
+subjects:
+  - kind: ServiceAccount
+    name: kubevirt-nfs-egress-sa
+    namespace: kubevirt-csi-driver
+roleRef:
+  kind: ClusterRole
+  name: kubevirt-nfs-egress-cr
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubevirt-nfs-fencing-binding
+subjects:
+  - kind: ServiceAccount
+    name: kubevirt-nfs-fencing-sa
+    namespace: kubevirt-csi-driver
+roleRef:
+  kind: ClusterRole
+  name: kubevirt-nfs-fencing-cr
+  apiGroup: rbac.authorization.k8s.io
