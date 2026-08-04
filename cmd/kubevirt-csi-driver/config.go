@@ -24,6 +24,9 @@ type config struct {
 
 	tenantClusterKubeconfig string
 
+	nfsPoolSize         int64
+	nfsPoolStorageClass string
+
 	runNodeService       bool
 	runControllerService bool
 

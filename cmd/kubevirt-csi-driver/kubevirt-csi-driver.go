@@ -55,6 +55,11 @@ func parseConfig(args []string) (*config, error) {
 	fs.BoolVar(&cfg.runNodeService, "run-node-service", true, "Specifies whether or not to run the node service, the default is true")
 	fs.BoolVar(&cfg.runControllerService, "run-controller-service", true, "Specifies whether or not to run the controller service, the default is true")
 
+	fs.Int64Var(&cfg.nfsPoolSize, "nfs-pool-size", 0, "size of the NFS Pool in Gi, this creates a DV on the infra cluster that enables RWX FS volumes")
+
+	// would be nice to just use default sc if available
+	fs.StringVar(&cfg.nfsPoolStorageClass, "nfs-pool-sc", "", "storage class used for nfs pool")
+
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -84,6 +89,21 @@ func initializeDriver(cfg *config) (*service.KubevirtCSIDriver, error) {
 		driver, err = configureControllerService(cfg, driver)
 		if err != nil {
 			return nil, fmt.Errorf("failed to configure controller service: %w", err)
+		}
+
+		klog.V(1).Infof("creating NFS pool with size %d and storage class %s", cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
+
+		if cfg.nfsPoolSize != 0 && len(cfg.nfsPoolStorageClass) != 0 {
+			klog.V(1).Infof("RWX FS enabled, creating NFS pool with size %d and storage class %s", cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
+			// TODO, this is already
+			infraClusterLabels, err := parseLabels(cfg)
+			if err != nil {
+
+			}
+			err = driver.ControllerService.CreateNFSPoolDV(cfg.volumePrefix, cfg.infraClusterNamespace, infraClusterLabels, cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create NFS Pool: %w", err)
+			}
 		}
 	}
 

@@ -40,6 +40,8 @@ spec:
             - "--run-node-service=false"
             - "--run-controller-service=true"
             - "--v=5"
+            - "--nfs-pool-size=10"
+            - "--nfs-pool-sc=rook-ceph-block"
           ports:
             - name: healthz
               containerPort: 10301

@@ -84,14 +84,15 @@ func (c *ControllerService) validateCreateVolumeRequest(req *csi.CreateVolumeReq
 		return false, status.Error(codes.InvalidArgument, "volume capabilities missing in request")
 	}
 
-	isBlock, isRWX, err := getAccessMode(caps)
+	_, isRWX, err := getAccessMode(caps)
 	if err != nil {
 		return false, err
 	}
 
-	if isRWX && !isBlock {
-		return false, status.Error(codes.InvalidArgument, "non-block volume with RWX access mode is not supported")
-	}
+	// TODO, can only allow this if config is explicitly set
+	// if isRWX && !isBlock {
+	// 	return false, status.Error(codes.InvalidArgument, "non-block volume with RWX access mode is not supported")
+	// }
 
 	if c.storageClassEnforcement.AllowAll {
 		return isRWX, nil
@@ -164,6 +165,17 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	isRWX, err := c.validateCreateVolumeRequest(req)
 	if err != nil {
 		return nil, err
+	}
+
+	isBlock, _, err := getAccessMode(req.GetVolumeCapabilities())
+	if err != nil {
+		return nil, err
+	}
+
+	useNFS := false
+	// RWX FS volumes need to be handled separately through the NFS sidecar
+	if !isBlock && isRWX {
+		useNFS = true
 	}
 
 	// Prepare parameters for the DataVolume
@@ -260,15 +272,21 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// Prepare serial for disk
 	serial := string(dv.GetUID())
 
+	volContext := map[string]string{
+		busParameter:    string(bus),
+		serialParameter: serial,
+	}
+
+	if useNFS {
+		volContext["nfs"] = "true"
+	}
+
 	// Return response
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			CapacityBytes: storageSize,
 			VolumeId:      dvName,
-			VolumeContext: map[string]string{
-				busParameter:    string(bus),
-				serialParameter: serial,
-			},
+			VolumeContext: volContext,
 			ContentSource: req.GetVolumeContentSource(),
 		},
 	}, nil
@@ -986,4 +1004,48 @@ func (c *ControllerService) IsVolumeAttachedToOtherVMI(
 	}
 
 	return false, nil
+}
+
+func (c *ControllerService) CreateNFSPoolDV(volPrefix, infraNamespace string, infraLabels map[string]string, size int64, storageClass string) error {
+	poolName := fmt.Sprintf("%s-nfs-pool", volPrefix)
+	dv := &cdiv1.DataVolume{
+		TypeMeta: v1.TypeMeta{
+			Kind:       "DataVolume",
+			APIVersion: cdiv1.SchemeGroupVersion.String(),
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Name:      poolName,
+			Namespace: infraNamespace,
+			Labels:    infraLabels,
+			Annotations: map[string]string{
+				"cdi.kubevirt.io/storage.deleteAfterCompletion": "false",
+			},
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			Source: &cdiv1.DataVolumeSource{
+				Blank: &cdiv1.DataVolumeBlankImage{},
+			},
+			Storage: &cdiv1.StorageSpec{
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", size)),
+					},
+				},
+				StorageClassName: &storageClass,
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+
+	if _, err := c.virtClient.GetDataVolume(context.TODO(), infraNamespace, poolName); err == nil {
+		klog.V(2).Infof("NFS pool DV %s/%s already exists, skipping creation", infraNamespace, poolName)
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check for existing NFS pool DV: %w", err)
+	}
+
+	if _, err := c.virtClient.CreateDataVolume(context.TODO(), infraNamespace, dv); err != nil {
+		return fmt.Errorf("failed to create NFS pool DV with size %d and storage class %s: %w", size, storageClass, err)
+	}
+	return nil
 }
