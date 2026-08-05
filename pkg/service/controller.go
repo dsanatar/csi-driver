@@ -31,6 +31,8 @@ const (
 	serialParameter = "serial"
 
 	ErrVolumeAttachedMessage = "volume is attached to another VM"
+	nodeNameLabel            = "kubevirt.io/nodeName"
+	nfsServerLabel           = "csi.kubevirt.io/nfs-server"
 )
 
 var (
@@ -1006,15 +1008,15 @@ func (c *ControllerService) IsVolumeAttachedToOtherVMI(
 	return false, nil
 }
 
-func (c *ControllerService) CreateNFSPoolDV(volPrefix, infraNamespace string, infraLabels map[string]string, size int64, storageClass string) error {
-	poolName := fmt.Sprintf("%s-nfs-pool", volPrefix)
+func (c *ControllerService) CreateNFSPoolDV(volPrefix, infraNamespace string, infraLabels map[string]string, size int64, storageClass string) (string, error) {
+	dvName := fmt.Sprintf("%s-nfs-pool", volPrefix)
 	dv := &cdiv1.DataVolume{
 		TypeMeta: v1.TypeMeta{
 			Kind:       "DataVolume",
 			APIVersion: cdiv1.SchemeGroupVersion.String(),
 		},
 		ObjectMeta: v1.ObjectMeta{
-			Name:      poolName,
+			Name:      dvName,
 			Namespace: infraNamespace,
 			Labels:    infraLabels,
 			Annotations: map[string]string{
@@ -1037,15 +1039,64 @@ func (c *ControllerService) CreateNFSPoolDV(volPrefix, infraNamespace string, in
 		},
 	}
 
-	if _, err := c.virtClient.GetDataVolume(context.TODO(), infraNamespace, poolName); err == nil {
-		klog.V(2).Infof("NFS pool DV %s/%s already exists, skipping creation", infraNamespace, poolName)
-		return nil
+	if _, err := c.virtClient.GetDataVolume(context.TODO(), infraNamespace, dvName); err == nil {
+		klog.V(2).Infof("NFS pool DV %s/%s already exists, skipping creation", infraNamespace, dvName)
+		return dvName, nil
 	} else if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check for existing NFS pool DV: %w", err)
+		return "", fmt.Errorf("failed to check for existing NFS pool DV: %w", err)
 	}
 
 	if _, err := c.virtClient.CreateDataVolume(context.TODO(), infraNamespace, dv); err != nil {
-		return fmt.Errorf("failed to create NFS pool DV with size %d and storage class %s: %w", size, storageClass, err)
+		return "", fmt.Errorf("failed to create NFS pool DV with size %d and storage class %s: %w", size, storageClass, err)
+	}
+	return dvName, nil
+}
+
+func (c *ControllerService) HotplugNFSPool(infraNamespace, dvName string) error {
+	// find the VMI on the infra cluster that is one of the worker nodes on the tenant
+	vmiName, err := c.virtClient.FindTenantWorkerNode(context.TODO(), infraNamespace)
+	if err != nil {
+		return err
+	}
+
+	if len(vmiName) == 0 {
+		return fmt.Errorf("could not find any valid work nodes on tenant cluster")
+	}
+
+	if err = c.virtClient.LabelTenantNode(context.TODO(), vmiName, nfsServerLabel, "true"); err != nil {
+		return fmt.Errorf("failed to label tenant node %w", err)
+	}
+
+	addVolumeOptions := &kubevirtv1.AddVolumeOptions{
+		Name: dvName,
+		Disk: &kubevirtv1.Disk{
+			// Serial: serial, TODO need serial?
+			DiskDevice: kubevirtv1.DiskDevice{
+				Disk: &kubevirtv1.DiskTarget{
+					Bus: kubevirtv1.DiskBus("virtio"),
+				},
+			},
+		},
+		VolumeSource: &kubevirtv1.HotplugVolumeSource{
+			DataVolume: &kubevirtv1.DataVolumeSource{
+				Name: dvName,
+			},
+		},
+	}
+
+	if err := wait.ExponentialBackoff(wait.Backoff{
+		Duration: time.Second,
+		Steps:    5,
+		Factor:   2,
+		Cap:      time.Second * 30,
+	}, func() (bool, error) {
+		if err := c.addVolumeToVm(context.TODO(), dvName, vmiName, addVolumeOptions); err != nil {
+			klog.Infof("failed adding volume %s to VM %s, retrying, err: %v", dvName, vmiName, err)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		return err
 	}
 	return nil
 }

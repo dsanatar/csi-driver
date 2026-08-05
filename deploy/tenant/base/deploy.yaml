@@ -32,7 +32,7 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: ['']
     resources: ['nodes']
-    verbs: ['get', 'list', 'watch']
+    verbs: ['get', 'list', 'watch', 'patch']
   - apiGroups: ['storage.k8s.io']
     resources: ['volumeattachments']
     verbs: ['get', 'list', 'watch', 'update', 'patch']

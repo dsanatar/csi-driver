@@ -100,9 +100,17 @@ func initializeDriver(cfg *config) (*service.KubevirtCSIDriver, error) {
 			if err != nil {
 
 			}
-			err = driver.ControllerService.CreateNFSPoolDV(cfg.volumePrefix, cfg.infraClusterNamespace, infraClusterLabels, cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
+			dvName, err := driver.ControllerService.CreateNFSPoolDV(cfg.volumePrefix, cfg.infraClusterNamespace, infraClusterLabels, cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create NFS Pool: %w", err)
+			}
+
+			// find infra VM that is a worker node on tenant cluster
+			// label is so the nfs sider can be scheduled to that node
+			// hotplug new pool dv to this vm
+			err = driver.ControllerService.HotplugNFSPool(cfg.infraClusterNamespace, dvName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to hotplug NFS Pool DV: %w", err)
 			}
 		}
 	}

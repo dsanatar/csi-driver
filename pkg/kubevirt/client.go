@@ -35,6 +35,7 @@ const (
 	annDefaultSnapshotClass         = "snapshot.storage.kubernetes.io/is-default-class"
 	InfraStorageClassNameParameter  = "infraStorageClassName"
 	InfraSnapshotClassNameParameter = "infraSnapshotClassName"
+	clusterRoleLabel                = "cluster.x-k8s.io/role"
 )
 
 type InfraTenantStorageSnapshotMapping struct {
@@ -77,6 +78,8 @@ type Client interface {
 	GetVolumeSnapshot(ctx context.Context, namespace, name string) (*snapshotv1.VolumeSnapshot, error)
 	DeleteVolumeSnapshot(ctx context.Context, namespace, name string) error
 	ListVolumeSnapshots(ctx context.Context, namespace string) (*snapshotv1.VolumeSnapshotList, error)
+	FindTenantWorkerNode(ctx context.Context, namespace string) (string, error)
+	LabelTenantNode(ctx context.Context, nodeName, label, val string) error
 }
 
 type client struct {
@@ -540,6 +543,54 @@ func (c *client) ListVolumeSnapshots(ctx context.Context, namespace string) (*sn
 	return c.infraSnapClient.SnapshotV1().VolumeSnapshots(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: sl.String(),
 	})
+}
+
+func (c *client) FindTenantWorkerNode(ctx context.Context, namespace string) (string, error) {
+	vmis, err := c.ListVirtualMachines(ctx, namespace)
+	if err != nil {
+		return "", err
+	}
+
+	vmiName := ""
+	for _, vmi := range vmis {
+		labels := vmi.GetLabels()
+		if len(vmi.GetLabels()) != 0 {
+			if labels[clusterRoleLabel] == "worker" {
+				vmiName = vmi.Name
+			}
+		}
+	}
+
+	return vmiName, nil
+}
+
+func (c *client) LabelTenantNode(ctx context.Context, nodeName, label, val string) error {
+	node, err := c.tenantKubernetesClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil || node == nil {
+		return fmt.Errorf("failed to find tenant node %s: %w", nodeName, err)
+	}
+
+	labels := node.GetLabels()
+	if labels == nil {
+		labels = map[string]string{label: val}
+	} else {
+		labels[label] = val
+	}
+
+	patchData, err := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": labels,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal label patch for node %s: %w", nodeName, err)
+	}
+	_, err = c.tenantKubernetesClient.CoreV1().Nodes().Patch(ctx, nodeName, types.MergePatchType, patchData, metav1.PatchOptions{})
+
+	if err != nil {
+		return fmt.Errorf("failed to patch node %s: %w", nodeName, err)
+	}
+	return nil
 }
 
 func (c *client) buildStorageClassSnapshotClassMapping(snapshotClient snapcli.Interface, infraStorageSnapMapping []util.StorageSnapshotMapping) ([]InfraTenantStorageSnapshotMapping, error) {
