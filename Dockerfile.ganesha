@@ -1,8 +1,18 @@
-FROM registry.fedoraproject.org/fedora-minimal:42
-RUN dnf update && \
-    dnf install -y nfs-ganesha nfs-ganesha-vfs dbus rpcbind && \
-    rm -rf /var/lib/apt/lists/*
+FROM ubuntu:22.04
 
-# rpcbind must be running before ganesha starts so it can register its services.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y nfs-ganesha nfs-ganesha-vfs dbus rpcbind && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /proc/mounts /etc/mtab
+
+# nfsd must be unloaded to prevent it claiming port 2049 before Ganesha.
+# rpcbind and dbus are required by Ganesha for RPC registration and management.
 CMD ["/bin/bash", "-c", \
-     "rpcbind; ganesha.nfsd -F -L /dev/stderr -f /etc/ganesha/ganesha.conf -N NIV_EVENT -p /var/run/ganesha/ganesha.pid"]
+     "modprobe -r nfsd 2>/dev/null || true; \
+      rpcbind; \
+      mkdir -p /run/dbus; \
+      dbus-uuidgen --ensure; \
+      dbus-daemon --system --fork; \
+      sleep 1; \
+      ganesha.nfsd -F -L /dev/stderr -f /etc/ganesha/ganesha.conf -N NIV_EVENT -p /var/run/ganesha/ganesha.pid"]

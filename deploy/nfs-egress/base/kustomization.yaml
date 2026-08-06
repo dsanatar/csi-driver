@@ -2,8 +2,4 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - rbac.yaml
-  - ganesha-config.yaml
-  - daemonset.yaml
-  - service.yaml
-  - fencing-controller.yaml
+  - ../../controller-tenant/dev-overlay

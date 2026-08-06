@@ -36,3 +36,4 @@ hack/tools/bin/
 /deploy/controller-tenant/dev-overlay/*.yaml
 /deploy/controller-infra/dev-overlay/*.yaml
 /deploy/tenant/dev-overlay/*.yaml
+/deploy/nfs-egress/dev-overlay/*yaml

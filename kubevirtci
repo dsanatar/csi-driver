@@ -27,6 +27,8 @@ export CLUSTERCTL_PATH=${CLUSTERCTL_PATH:-${_default_clusterctl_path}}
 export TENANT_CLUSTER_NAME=${TENANT_CLUSTER_NAME:-kvcluster}
 export TENANT_CLUSTER_NAMESPACE=${TENANT_CLUSTER_NAMESPACE:-kvcluster}
 
+export ENABLE_RWX_FS=${ENABLE_RWX_FS:-false}
+
 _kubectl=cluster-up/cluster-up/kubectl.sh
 _ssh_infra=cluster-up/cluster-up/ssh.sh
 
@@ -115,6 +117,10 @@ function kubevirtci::build() {
 	export REGISTRY="127.0.0.1:$(cluster-up/cluster-up/cli.sh ports registry)"
 	make image-build
 	make image-push
+	if [[ "$ENABLE_RWX_FS" == "true" ]]; then 
+		make nfs-image-build
+		make nfs-image-push
+	fi
 }
 
 function kubevirtci::ssh_tenant() {

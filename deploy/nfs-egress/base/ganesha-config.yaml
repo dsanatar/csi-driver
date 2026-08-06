@@ -6,49 +6,18 @@ metadata:
 data:
   ganesha.conf: |
     NFS_Core_Param {
-        # Clustered = TRUE because this instance participates in NFSv4 lock
-        # state recovery. A single ganesha instance with Clustered = TRUE
-        # still serves multiple concurrent NFS clients correctly; the setting
-        # enables the v4recov recovery backend so clients can reclaim locks
-        # after the pod is rescheduled following a node failure.
-        Clustered = TRUE;
-
-        # Node_Base must be unique and stable across restarts of this ganesha
-        # instance. It is injected at pod startup by the sidecar init container,
-        # which writes a rendered copy of this config to the pool volume so the
-        # value persists through failover.
-        Node_Base = "GANESHA_NODE_BASE_PLACEHOLDER";
-
-        # State is stored on the pool block device so it survives the pod
-        # being rescheduled to a different node during failover.
-        State_Path = "/mnt/pool/.ganesha-state";
-
         NFS_Port = 2049;
-
-        # Serve NFSv4 only — disables NFSv3 and removes the rpcbind dependency.
         Protocols = 4;
+        Transports = TCP;
     }
 
     NFSv4 {
         Minor_Versions = 1;
-
-        # v4recov allows NFSv4.1 clients to reclaim their locks within the
-        # grace period after this server restarts or fails over.
-        RecoveryBackend = "v4recov";
-        RecoveryDir = "/mnt/pool/.ganesha-state/v4recov";
-
-        # Grace period must be long enough for clients to reconnect after
-        # the fencing controller completes the detach/reattach cycle and the
-        # pod is rescheduled. 90 seconds gives headroom beyond the 60s target.
-        Grace_Period = 90;
+        Graceless = TRUE;
     }
 
     LOG {
         Default_Log_Level = EVENT;
     }
 
-    # The sidecar writes all export stanzas to this single file and rewrites
-    # it on every CreateExport / DeleteExport call before sending SIGHUP.
-    # The file lives on the pool device so exports are automatically restored
-    # when the sidecar init container runs on a new node after failover.
     %include /mnt/pool/.ganesha-state/exports.conf

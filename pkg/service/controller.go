@@ -1070,10 +1070,10 @@ func (c *ControllerService) HotplugNFSPool(infraNamespace, dvName string) error 
 	addVolumeOptions := &kubevirtv1.AddVolumeOptions{
 		Name: dvName,
 		Disk: &kubevirtv1.Disk{
-			// Serial: serial, TODO need serial?
+			Serial: "nfs-pool", // TODO, this is hardcoded and thats no good
 			DiskDevice: kubevirtv1.DiskDevice{
 				Disk: &kubevirtv1.DiskTarget{
-					Bus: kubevirtv1.DiskBus("virtio"),
+					Bus: kubevirtv1.DiskBus("scsi"),
 				},
 			},
 		},

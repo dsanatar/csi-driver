@@ -39,7 +39,7 @@ spec:
         - name: pool-setup
           # Requires: lsblk, blkid, mkfs.xfs (xfsprogs), mount, sed, awk.
           # Use any image that provides util-linux and xfsprogs.
-          image: quay.io/rh-ee-dsanatar/nfs-sidecar:latest
+          image: 192.168.66.2:5000/nfs-sidecar:latest
           imagePullPolicy: Always
           command:
             - /bin/bash
@@ -48,9 +48,9 @@ spec:
               set -euo pipefail
 
               # Locate the pool block device by its fixed serial.
-              DEVICE=$(lsblk -lno SERIAL,NAME | awk -v s="$POOL_DV_SERIAL" '$1==s {print "/dev/" $2; exit}')
+              DEVICE=$(readlink -f /dev/disk/by-id/*${POOL_DV_SERIAL}* 2>/dev/null | head -1)
               if [ -z "$DEVICE" ]; then
-                echo "ERROR: no block device with serial '${POOL_DV_SERIAL}' found" >&2
+                echo "ERROR: no device found for serial '${POOL_DV_SERIAL}' in /dev/disk/by-id/" >&2
                 exit 1
               fi
               echo "Found pool device: $DEVICE"
@@ -112,7 +112,7 @@ spec:
         - name: nfs-ganesha
           # Replace with your preferred NFS-Ganesha image (v3+ required for
           # v4recov recovery backend and NFSv4.1 support).
-          image: quay.io/rh-ee-dsanatar/nfs-ganesha:latest
+          image: 192.168.66.2:5000/nfs-ganesha:latest
           imagePullPolicy: Always
           securityContext:
             privileged: true
@@ -136,7 +136,7 @@ spec:
               cpu: 50m
 
         - name: control-sidecar
-          image: quay.io/rh-ee-dsanatar/nfs-sidecar:latest
+          image: 192.168.66.2:5000/nfs-sidecar:latest
           imagePullPolicy: Always
           command: ["/nfs-sidecar", "--listen-addr=:9090"]
           securityContext:

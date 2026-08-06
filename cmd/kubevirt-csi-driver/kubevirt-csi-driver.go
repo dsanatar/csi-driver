@@ -91,8 +91,6 @@ func initializeDriver(cfg *config) (*service.KubevirtCSIDriver, error) {
 			return nil, fmt.Errorf("failed to configure controller service: %w", err)
 		}
 
-		klog.V(1).Infof("creating NFS pool with size %d and storage class %s", cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
-
 		if cfg.nfsPoolSize != 0 && len(cfg.nfsPoolStorageClass) != 0 {
 			klog.V(1).Infof("RWX FS enabled, creating NFS pool with size %d and storage class %s", cfg.nfsPoolSize, cfg.nfsPoolStorageClass)
 			// TODO, this is already

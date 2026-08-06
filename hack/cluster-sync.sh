@@ -9,6 +9,9 @@ REGISTRY=${REGISTRY:-192.168.66.2:5000}
 TARGET_NAME=${TARGET_NAME:-kubevirt-csi-driver}
 TAG=${TAG:-latest}
 export INFRACLUSTER_LABELS=${INFRACLUSTER_LABELS:-"tenant-cluster=${TENANT_CLUSTER_NAMESPACE}"}
+ENABLE_RWX_FS=${ENABLE_RWX_FS:-false}
+NFS_POOL_SIZE=${NFS_POOL_SIZE:-10}
+NFS_POOL_SC=${NFS_POOL_SC:-rook-ceph-block}
 
 function tenant::deploy_kubeconfig_secret() {
   TOKEN=$(_kubectl create token kubevirt-csi -n $TENANT_CLUSTER_NAMESPACE)
@@ -82,6 +85,30 @@ spec:
 END
 }
 
+function cluster::generate_nfs_egress_dev_overlay() {
+  cat <<- END > ./deploy/nfs-egress/dev-overlay/kustomization.yaml
+resources:
+- ../../controller-tenant/dev-overlay
+patches:
+- path: controller-nfs-args.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: kubevirt-csi-controller
+    namespace: $CSI_DRIVER_NAMESPACE
+END
+
+  cat <<- END > ./deploy/nfs-egress/dev-overlay/controller-nfs-args.yaml
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "--nfs-pool-size=${NFS_POOL_SIZE}"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "--nfs-pool-sc=${NFS_POOL_SC}"
+END
+}
+
 # ******************************************************
 # Build the driver
 # ******************************************************
@@ -122,8 +149,23 @@ _kubectl_tenant apply --kustomize ./deploy/tenant/dev-overlay
 # ******************************************************
 _kubectl_tenant apply --kustomize ./deploy/controller-tenant/dev-overlay
 
+if [[ "$ENABLE_RWX_FS" == "true" ]]; then 
+  mkdir -p ./deploy/nfs-egress/dev-overlay
+  cluster::generate_nfs_egress_dev_overlay
+  _kubectl_tenant apply --kustomize ./deploy/nfs-egress/dev-overlay
+fi
+
 # ******************************************************
 # Wait for driver to rollout
 # ******************************************************
 wait::check_rollout "_kubectl_tenant" "ds" "kubevirt-csi-node" "$CSI_DRIVER_NAMESPACE" "5m"
 wait::check_rollout "_kubectl_tenant" "deployment" "kubevirt-csi-controller" "$CSI_DRIVER_NAMESPACE" "5m"
+
+if [[ "$ENABLE_RWX_FS" == "true" ]]; then 
+  _kubectl_tenant apply -f ./deploy/nfs-egress/base/rbac.yaml
+  _kubectl_tenant apply -f ./deploy/nfs-egress/base/service.yaml
+  _kubectl_tenant apply -f ./deploy/nfs-egress/base/ganesha-config.yaml
+  _kubectl_tenant apply -f ./deploy/nfs-egress/base/daemonset.yaml
+
+  wait::check_rollout "_kubectl_tenant" "ds" "kubevirt-nfs-egress" "$CSI_DRIVER_NAMESPACE" "5m"
+fi

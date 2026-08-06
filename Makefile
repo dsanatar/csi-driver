@@ -55,11 +55,23 @@ image-build:
 	$$CRI_BIN build -t $(IMAGE_REF) --build-arg git_sha=$(SHA) .
 
 
+.PHONY: nfs-image-build
+nfs-image-build:
+	source ./hack/cri-bin.sh && \
+	$$CRI_BIN build -f Dockerfile.sidecar -t $(REGISTRY)/nfs-sidecar:$(TAG) --build-arg git_sha=$(SHA) . && \
+	$$CRI_BIN build -f Dockerfile.ganesha -t $(REGISTRY)/nfs-ganesha:$(TAG) --build-arg git_sha=$(SHA)  .
+
 
 .PHONY: image-push
 image-push:
 	source ./hack/cri-bin.sh && \
 	$$CRI_BIN push $$PUSH_FLAGS $(IMAGE_REF)
+
+.PHONY: nfs-image-push
+nfs-image-push:
+	source ./hack/cri-bin.sh && \
+	$$CRI_BIN push $$PUSH_FLAGS $(REGISTRY)/nfs-sidecar:$(TAG) && \
+	$$CRI_BIN push $$PUSH_FLAGS $(REGISTRY)/nfs-ganesha:$(TAG)
 
 # This will call a macro called "add-bindata" which will generate bindata specific targets based on the parameters:
 # $0 - macro name
