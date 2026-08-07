@@ -36,6 +36,8 @@ const (
 	InfraStorageClassNameParameter  = "infraStorageClassName"
 	InfraSnapshotClassNameParameter = "infraSnapshotClassName"
 	clusterRoleLabel                = "cluster.x-k8s.io/role"
+	nfsServerLabel                  = "csi.kubevirt.io/nfs-server"
+	nfsServiceName                  = "kubevirt-nfs-egress"
 )
 
 type InfraTenantStorageSnapshotMapping struct {
@@ -79,7 +81,9 @@ type Client interface {
 	DeleteVolumeSnapshot(ctx context.Context, namespace, name string) error
 	ListVolumeSnapshots(ctx context.Context, namespace string) (*snapshotv1.VolumeSnapshotList, error)
 	FindTenantWorkerNode(ctx context.Context, namespace string) (string, error)
-	LabelTenantNode(ctx context.Context, nodeName, label, val string) error
+	LabelTenantNodeNFS(ctx context.Context, nodeName string) error
+	CheckNFSServerActive(ctx context.Context) (bool, error)
+	GetNFSService(ctx context.Context, namespace string) (string, error)
 }
 
 type client struct {
@@ -564,7 +568,7 @@ func (c *client) FindTenantWorkerNode(ctx context.Context, namespace string) (st
 	return vmiName, nil
 }
 
-func (c *client) LabelTenantNode(ctx context.Context, nodeName, label, val string) error {
+func (c *client) LabelTenantNodeNFS(ctx context.Context, nodeName string) error {
 	node, err := c.tenantKubernetesClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil || node == nil {
 		return fmt.Errorf("failed to find tenant node %s: %w", nodeName, err)
@@ -572,9 +576,9 @@ func (c *client) LabelTenantNode(ctx context.Context, nodeName, label, val strin
 
 	labels := node.GetLabels()
 	if labels == nil {
-		labels = map[string]string{label: val}
+		labels = map[string]string{nfsServerLabel: "true"}
 	} else {
-		labels[label] = val
+		labels[nfsServerLabel] = "true"
 	}
 
 	patchData, err := json.Marshal(map[string]interface{}{
@@ -591,6 +595,30 @@ func (c *client) LabelTenantNode(ctx context.Context, nodeName, label, val strin
 		return fmt.Errorf("failed to patch node %s: %w", nodeName, err)
 	}
 	return nil
+}
+
+func (c *client) CheckNFSServerActive(ctx context.Context) (bool, error) {
+	nodes, err := c.tenantKubernetesClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("failed to list tenant nodes: %w", err)
+	}
+
+	for _, node := range nodes.Items {
+		labels := node.GetLabels()
+		if _, ok := labels[nfsServerLabel]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *client) GetNFSService(ctx context.Context, namespace string) (string, error) {
+	svc, err := c.tenantKubernetesClient.CoreV1().Services(namespace).Get(ctx, nfsServiceName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve nfs service %s/%s: %w", namespace, nfsServiceName, err)
+	}
+
+	return svc.Spec.ClusterIP, nil
 }
 
 func (c *client) buildStorageClassSnapshotClassMapping(snapshotClient snapcli.Interface, infraStorageSnapMapping []util.StorageSnapshotMapping) ([]InfraTenantStorageSnapshotMapping, error) {

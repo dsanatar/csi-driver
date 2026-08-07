@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +25,7 @@ import (
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	client "kubevirt.io/csi-driver/pkg/kubevirt"
+	"kubevirt.io/csi-driver/pkg/nfscontroller"
 	"kubevirt.io/csi-driver/pkg/util"
 )
 
@@ -31,8 +35,6 @@ const (
 	serialParameter = "serial"
 
 	ErrVolumeAttachedMessage = "volume is attached to another VM"
-	nodeNameLabel            = "kubevirt.io/nodeName"
-	nfsServerLabel           = "csi.kubevirt.io/nfs-server"
 )
 
 var (
@@ -46,6 +48,8 @@ type ControllerService struct {
 	infraClusterNamespace   string
 	infraClusterLabels      map[string]string
 	storageClassEnforcement util.StorageClassEnforcement
+	nfsSidecarClient        nfscontroller.NFSEgressControllerClient
+	nfsClientMutex          sync.Mutex
 }
 
 // NewControllerService creates a new instance of ControllerService.
@@ -86,15 +90,21 @@ func (c *ControllerService) validateCreateVolumeRequest(req *csi.CreateVolumeReq
 		return false, status.Error(codes.InvalidArgument, "volume capabilities missing in request")
 	}
 
-	_, isRWX, err := getAccessMode(caps)
+	isBlock, isRWX, err := getAccessMode(caps)
 	if err != nil {
 		return false, err
 	}
 
-	// TODO, can only allow this if config is explicitly set
-	// if isRWX && !isBlock {
-	// 	return false, status.Error(codes.InvalidArgument, "non-block volume with RWX access mode is not supported")
-	// }
+	if isRWX && !isBlock {
+		active, err := c.virtClient.CheckNFSServerActive(context.TODO())
+		if err != nil {
+			return false, err
+		}
+		if !active {
+			return false, status.Error(codes.InvalidArgument, "cluster is not configured to support RWX FS volumes")
+		}
+
+	}
 
 	if c.storageClassEnforcement.AllowAll {
 		return isRWX, nil
@@ -174,12 +184,6 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, err
 	}
 
-	useNFS := false
-	// RWX FS volumes need to be handled separately through the NFS sidecar
-	if !isBlock && isRWX {
-		useNFS = true
-	}
-
 	// Prepare parameters for the DataVolume
 	storageClassName := req.Parameters[client.InfraStorageClassNameParameter]
 	storageSize := req.GetCapacityRange().GetRequiredBytes()
@@ -190,6 +194,23 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		bus = kubevirtv1.DiskBus(value)
 	} else {
 		bus = busDefaultValue
+	}
+
+	// RWX FS volumes need to be handled separately through the NFS sidecar
+	// instead of creating a new DV on the infra cluster, we will create a new NFS export
+	if !isBlock && isRWX {
+		// Return response
+		return &csi.CreateVolumeResponse{
+			Volume: &csi.Volume{
+				CapacityBytes: storageSize,
+				VolumeId:      dvName,
+				VolumeContext: map[string]string{
+					busParameter: string(bus),
+					// TODO, need serial?
+				},
+				ContentSource: req.GetVolumeContentSource(),
+			},
+		}, nil
 	}
 
 	// Create DataVolume object
@@ -274,21 +295,15 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// Prepare serial for disk
 	serial := string(dv.GetUID())
 
-	volContext := map[string]string{
-		busParameter:    string(bus),
-		serialParameter: serial,
-	}
-
-	if useNFS {
-		volContext["nfs"] = "true"
-	}
-
 	// Return response
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			CapacityBytes: storageSize,
 			VolumeId:      dvName,
-			VolumeContext: volContext,
+			VolumeContext: map[string]string{
+				busParameter:    string(bus),
+				serialParameter: serial,
+			},
 			ContentSource: req.GetVolumeContentSource(),
 		},
 	}, nil
@@ -413,6 +428,30 @@ func (c *ControllerService) ControllerPublishVolume(
 		}
 	}
 
+	isBlock := req.GetVolumeCapability().GetBlock() != nil
+
+	if isRWX && !isBlock {
+		client, endpoint, err := c.getNFSClient(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get nfs sidecar client %w", err)
+		}
+
+		// forward request to NFS Sidecar to create new export
+		resp, err := client.CreateExport(ctx, &nfscontroller.CreateExportRequest{
+			PvcUid: req.GetVolumeId(),
+		})
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "failed to create new export: %v", err)
+		}
+
+		return &csi.ControllerPublishVolumeResponse{
+			PublishContext: map[string]string{
+				"nfsServer": endpoint,
+				"nfsPath":   resp.ExportPath,
+			},
+		}, nil
+	}
+
 	if _, err := c.virtClient.GetDataVolume(ctx, c.infraClusterNamespace, dvName); errors.IsNotFound(err) {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	} else if err != nil {
@@ -492,6 +531,37 @@ func (c *ControllerService) ControllerPublishVolume(
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
+// get nfs sidecar client if it exists, otherwise create it
+func (c *ControllerService) getNFSClient(ctx context.Context) (nfscontroller.NFSEgressControllerClient, string, error) {
+	c.nfsClientMutex.Lock()
+	defer c.nfsClientMutex.Unlock()
+
+	endpoint, err := c.virtClient.GetNFSService(ctx, "kubevirt-csi-driver")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get NFS sidecar service: %w", err)
+	}
+	if endpoint == "" {
+		return nil, "", fmt.Errorf("NFS Service did not contain a valid endpoint")
+	}
+
+	if c.nfsSidecarClient != nil {
+		return c.nfsSidecarClient, endpoint, nil
+	}
+
+	klog.V(2).Infof("Creating NFS Sidecar Client at endpoint %s", endpoint)
+	conn, err := grpc.NewClient(
+		endpoint+":9090",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to connect to NFS sidecar: %w", err)
+	}
+
+	c.nfsSidecarClient = nfscontroller.NewNFSEgressControllerClient(conn)
+	return c.nfsSidecarClient, endpoint, nil
+}
+
 func (c *ControllerService) isVolumeAttached(ctx context.Context, dvName, vmName string) (bool, error) {
 	vm, err := c.virtClient.GetWorkloadManagingVirtualMachine(ctx, c.infraClusterNamespace, vmName)
 	if err != nil {
@@ -547,6 +617,25 @@ func (c *ControllerService) ControllerUnpublishVolume(ctx context.Context, req *
 	}
 	dvName := req.VolumeId
 	klog.V(3).Infof("Detaching DataVolume %s from Node ID %s", dvName, req.NodeId)
+
+	// if the DV does not exist within the infra cluster, then it is an NFS export
+	if _, err := c.virtClient.GetDataVolume(ctx, c.infraClusterNamespace, dvName); errors.IsNotFound(err) {
+		client, _, err := c.getNFSClient(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get nfs sidecar client %w", err)
+		}
+
+		_, err = client.DeleteExport(ctx, &nfscontroller.DeleteExportRequest{
+			PvcUid: dvName,
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to delete export with pvc uid %s", dvName)
+		}
+
+		klog.V(3).Infof("Successfully removed export %s", dvName)
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
 
 	// Get VM name from node ID which is a namespace/name
 	_, vmName, err := cache.SplitMetaNamespaceKey(req.NodeId)
@@ -1063,7 +1152,7 @@ func (c *ControllerService) HotplugNFSPool(infraNamespace, dvName string) error 
 		return fmt.Errorf("could not find any valid work nodes on tenant cluster")
 	}
 
-	if err = c.virtClient.LabelTenantNode(context.TODO(), vmiName, nfsServerLabel, "true"); err != nil {
+	if err = c.virtClient.LabelTenantNodeNFS(context.TODO(), vmiName); err != nil {
 		return fmt.Errorf("failed to label tenant node %w", err)
 	}
 
@@ -1073,7 +1162,7 @@ func (c *ControllerService) HotplugNFSPool(infraNamespace, dvName string) error 
 			Serial: "nfs-pool", // TODO, this is hardcoded and thats no good
 			DiskDevice: kubevirtv1.DiskDevice{
 				Disk: &kubevirtv1.DiskTarget{
-					Bus: kubevirtv1.DiskBus("scsi"),
+					Bus: busDefaultValue, // scsi
 				},
 			},
 		},

@@ -58,7 +58,7 @@ func (n *NFSController) CreateExport(_ context.Context, req *CreateExportRequest
 
 	poolPath := os.Getenv("POOL_MOUNT_PATH")
 	exportPath := filepath.Join(poolPath, "export", req.PvcUid)
-	resp.ExportPath = filepath.Join("export", req.PvcUid)
+	resp.ExportPath = filepath.Join("/export", req.PvcUid)
 
 	klog.V(2).Infof("creating new export: %s", exportPath)
 
@@ -81,9 +81,16 @@ func (n *NFSController) CreateExport(_ context.Context, req *CreateExportRequest
 		}
 	} else {
 		klog.V(2).Infof("updating registry json for pvc %s", req.PvcUid)
+		oldId := registry.NextId
 		registry, err = addRegistryEntry(req.PvcUid, exportPath, registryPath)
 		if err != nil {
 			return resp, err
+		}
+
+		// nothing was changed, don't need to rewrite export conf
+		if oldId == registry.NextId {
+			resp.Success = true
+			return resp, nil
 		}
 	}
 
@@ -131,6 +138,7 @@ func (n *NFSController) DeleteExport(_ context.Context, req *DeleteExportRequest
 		return resp, err
 	}
 
+	// TODO, probably can skip this is we didnt remove anything
 	klog.V(2).Infof("writing ganesha export conf")
 	// rewrite the ganesha exports
 	if err := writeExports(poolPath, registry); err != nil {
@@ -172,10 +180,10 @@ func addRegistryEntry(pvcUid, exportPath, registryPath string) (*Registry, error
 		return nil, fmt.Errorf("registry is not correctly populated")
 	}
 
-	// we don't want to create a new entry if the pvc already exists in registry
 	for _, entry := range registry.Entries {
 		if entry.Id == pvcUid {
-			return nil, fmt.Errorf("duplicate found, pvc %s already exists in registry", pvcUid)
+			klog.V(3).Infof("export for pvc %s already exists, skipping creation", pvcUid)
+			return registry, nil
 		}
 	}
 
@@ -203,7 +211,8 @@ func removeRegistryEntry(pvcUid, registryPath string) (*Registry, error) {
 	}
 
 	if len(registry.Entries) == 0 {
-		return nil, fmt.Errorf("registry is empty, nothing to remove")
+		klog.V(3).Infof("registry is empty, pvc %s already removed", pvcUid)
+		return registry, nil
 	}
 
 	found := false
@@ -216,7 +225,8 @@ func removeRegistryEntry(pvcUid, registryPath string) (*Registry, error) {
 	}
 
 	if !found {
-		return nil, fmt.Errorf("could not find registry entry for pvc id: %s", pvcUid)
+		klog.V(3).Infof("pvc entry %s does not exist, nothing to remove", pvcUid)
+		return registry, nil
 	}
 
 	if err := writeJSON(registryPath, registry); err != nil {

@@ -166,7 +166,7 @@ func (n *NodeService) NodeStageVolume(_ context.Context, req *csi.NodeStageVolum
 	}
 	klog.V(3).Infof("Staging volume %s", req.VolumeId)
 
-	if req.VolumeCapability.GetMount() == nil {
+	if req.VolumeCapability.GetMount() == nil || req.GetPublishContext()["nfsServer"] != "" {
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -263,6 +263,30 @@ func (n *NodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if err := n.validateNodePublishRequest(req); err != nil {
 		return nil, err
 	}
+
+	if req.GetPublishContext()["nfsServer"] != "" {
+		// mount the targetPath to the nfs server
+		targetPath := req.GetTargetPath()
+		nfsServer := req.GetPublishContext()["nfsServer"]
+		nfsPath := req.GetPublishContext()["nfsPath"]
+		sourcePath := nfsServer + ":" + nfsPath
+
+		// MkdirAll returns nil if path already exists
+		if err := n.dirMaker.Make(targetPath, 0750); err != nil {
+			return nil, fmt.Errorf("failed to make target directory %w", err)
+		}
+
+		klog.V(2).Infof("Mounting source %s to target %s", sourcePath, targetPath)
+
+		err := n.mounter.Mount(sourcePath, targetPath, "nfs4", []string{
+			"hard", "timeo=100", "retrans=3", "vers=4.1",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to mount")
+		}
+		return &csi.NodePublishVolumeResponse{}, nil
+	}
+
 	fsType := ""
 	if req.VolumeCapability.GetMount() != nil {
 		fsType = req.VolumeCapability.GetMount().FsType

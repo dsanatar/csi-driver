@@ -8,7 +8,6 @@ data:
     NFS_Core_Param {
         NFS_Port = 2049;
         Protocols = 4;
-        Transports = TCP;
     }
 
     NFSv4 {
