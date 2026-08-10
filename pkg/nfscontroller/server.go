@@ -41,6 +41,7 @@ var exportTemplate = template.Must(template.New("export").Parse(`
       Squash = None;
       Sectype = sys;
       FSAL { Name = VFS; }
+	  Filesystem_id = 101.101;
   }
   `))
 
@@ -133,16 +134,24 @@ func (n *NFSController) DeleteExport(_ context.Context, req *DeleteExportRequest
 		return resp, fmt.Errorf("request does not include a pvc UID")
 	}
 
-	registry, err := removeRegistryEntry(req.PvcUid, registryPath)
-	if err != nil {
-		return resp, err
-	}
+	_, err := os.Stat(registryPath)
+	if os.IsNotExist(err) {
+		klog.Infof("registry not found at path %s, nothing to delete", registryPath)
 
-	// TODO, probably can skip this is we didnt remove anything
-	klog.V(2).Infof("writing ganesha export conf")
-	// rewrite the ganesha exports
-	if err := writeExports(poolPath, registry); err != nil {
-		return resp, err
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to stat path %s", registryPath)
+	} else {
+		registry, err := removeRegistryEntry(req.PvcUid, registryPath)
+		if err != nil {
+			return resp, err
+		}
+
+		// TODO, probably can skip this is we didnt remove anything
+		klog.V(2).Infof("writing ganesha export conf")
+		// rewrite the ganesha exports
+		if err := writeExports(poolPath, registry); err != nil {
+			return resp, err
+		}
 	}
 
 	resp.Success = true

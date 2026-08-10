@@ -1,0 +1,10 @@
+ARG builder_image=docker.io/library/golang:1.24.13
+FROM ${builder_image} AS builder
+WORKDIR /src/kubevirt-csi-driver
+COPY . .
+RUN go build -mod=vendor -trimpath -o nfs-fencing-controller ./cmd/nfs-fencing-controller/
+
+FROM quay.io/centos/centos:stream9
+
+COPY --from=builder /src/kubevirt-csi-driver/nfs-fencing-controller /nfs-fencing-controller
+ENTRYPOINT ["/nfs-fencing-controller"]

@@ -31,16 +31,14 @@ spec:
 
       containers:
         - name: fencing-controller
-          image: quay.io/kubevirt/nfs-fencing-controller:latest
+          image: 192.168.66.2:5000/nfs-fencing-controller:latest
           imagePullPolicy: Always
           args:
             - "--infra-cluster-kubeconfig=/var/run/secrets/infracluster/kubeconfig"
             - "--infra-cluster-namespace=$(INFRACLUSTER_NAMESPACE)"
-            - "--nfs-node-label=csi.kubevirt.io/nfs-server=true"
-            - "--nfs-egress-namespace=kubevirt-csi-driver"
-            - "--nfs-egress-pod-label=app=kubevirt-nfs-egress"
-            # Pool DV name is a fixed convention managed by the CSI controller.
-            - "--pool-dv-name=nfs-pool"
+            - "--infra-cluster-labels=$(INFRACLUSTER_LABELS)"
+            # pvc-nfs-pool matches the name produced by CreateNFSPoolDV (prefix=pvc)
+            - "--pool-dv-name=pvc-nfs-pool"
             - "--v=5"
           env:
             - name: INFRACLUSTER_NAMESPACE
@@ -48,6 +46,11 @@ spec:
                 configMapKeyRef:
                   name: driver-config
                   key: infraClusterNamespace
+            - name: INFRACLUSTER_LABELS
+              valueFrom:
+                configMapKeyRef:
+                  name: driver-config
+                  key: infraClusterLabels
           volumeMounts:
             - name: infracluster
               mountPath: /var/run/secrets/infracluster

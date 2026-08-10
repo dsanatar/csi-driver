@@ -168,4 +168,9 @@ if [[ "$ENABLE_RWX_FS" == "true" ]]; then
   _kubectl_tenant apply -f ./deploy/nfs-egress/base/daemonset.yaml
 
   wait::check_rollout "_kubectl_tenant" "ds" "kubevirt-nfs-egress" "$CSI_DRIVER_NAMESPACE" "5m"
+
+  _kubectl_tenant apply -f ./deploy/nfs-egress/base/fencing-controller.yaml
+  wait::check_rollout "_kubectl_tenant" "deployment" "kubevirt-nfs-fencing-controller" "$CSI_DRIVER_NAMESPACE" "5m"
+
+
 fi

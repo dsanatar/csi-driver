@@ -5,14 +5,15 @@ metadata:
   namespace: kubevirt-csi-driver
 data:
   ganesha.conf: |
-    NFS_Core_Param {
+    NFS_CORE_PARAM {
+        Clustered = TRUE;
         NFS_Port = 2049;
         Protocols = 4;
     }
 
     NFSv4 {
-        Minor_Versions = 1;
-        Graceless = TRUE;
+        RecoveryBackend = "fs";
+        Grace_Period = 60;
     }
 
     LOG {

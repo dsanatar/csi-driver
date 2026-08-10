@@ -20,6 +20,14 @@ spec:
       # Required so the sidecar can send SIGHUP to the ganesha process.
       shareProcessNamespace: true
 
+      # Fixed hostname so NFS-Ganesha presents a stable so_major_id across
+      # failover. Without this, each pod gets a unique hostname, the NFSv4.1
+      # client sees a different server identity after failover, and all
+      # cached file handles go stale (ESTALE). A fixed hostname also makes
+      # the default Node_Base stable, so recovery records written by the old
+      # server are found by the new one during the grace period.
+      hostname: nfs-ganesha
+
       # Only schedule on the node labelled as the NFS server.
       # The fencing controller is responsible for moving this label to a
       # healthy node and hotplugging the pool DV there during failover.
@@ -32,9 +40,7 @@ spec:
       # The init container guarantees the pool block device is mounted and the
       # ganesha state directory structure exists before any main container starts.
       # It uses standard Linux storage tools (util-linux, xfsprogs) — no custom
-      # binary required. It also renders ganesha.conf from the ConfigMap template,
-      # substituting the node name as Node_Base so the value is stable across
-      # pod restarts on the same node.
+      # binary required.
       initContainers:
         - name: pool-setup
           # Requires: lsblk, blkid, mkfs.xfs (xfsprogs), mount, sed, awk.
@@ -61,13 +67,15 @@ spec:
                 mkfs.xfs -f "$DEVICE"
               fi
 
-              # Skip mount if the pool is already mounted from a previous pod
-              # restart — the Bidirectional hostPath keeps the mount on the host.
-              if ! mountpoint -q /mnt/pool; then
+              # Mount the pool device if it isn't already. We check for the
+              # specific device rather than using mountpoint(1), because the
+              # hostPath bind mount makes /mnt/pool look like a mountpoint
+              # even when the pool device itself is not mounted.
+              if findmnt -n -o SOURCE --target /mnt/pool | grep -qF "$DEVICE"; then
+                echo "$DEVICE already mounted at /mnt/pool — skipping"
+              else
                 mount "$DEVICE" /mnt/pool
                 echo "Mounted $DEVICE at /mnt/pool"
-              else
-                echo "/mnt/pool already mounted — skipping"
               fi
 
               # Create directory structure on first use; existing dirs are a no-op.
@@ -78,20 +86,12 @@ spec:
               # On recovery the file already exists on the pool device.
               touch /mnt/pool/.ganesha-state/exports.conf
 
-              # Render ganesha.conf from the ConfigMap template, substituting
-              # the node name as Node_Base so the identifier is stable per node.
-              sed "s/GANESHA_NODE_BASE_PLACEHOLDER/${KUBE_NODE_NAME}/" \
-                /tmp/ganesha-template/ganesha.conf > /etc/ganesha/ganesha.conf
-              echo "ganesha.conf rendered with Node_Base=${KUBE_NODE_NAME}"
+              cp /tmp/ganesha-template/ganesha.conf /etc/ganesha/ganesha.conf
           securityContext:
             privileged: true
           env:
             - name: POOL_DV_SERIAL
               value: "nfs-pool"
-            - name: KUBE_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
           volumeMounts:
             - name: dev
               mountPath: /dev
@@ -126,6 +126,8 @@ spec:
               mountPropagation: HostToContainer
             - name: run-ganesha
               mountPath: /var/run/ganesha
+            - name: ganesha-state
+              mountPath: /var/lib/nfs/ganesha
           ports:
             - name: nfs
               containerPort: 2049
@@ -190,4 +192,8 @@ spec:
         - name: run-ganesha
           hostPath:
             path: /var/run/ganesha
+            type: DirectoryOrCreate
+        - name: ganesha-state
+          hostPath:
+            path: /mnt/pool/.ganesha-state
             type: DirectoryOrCreate
